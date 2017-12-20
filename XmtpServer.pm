@@ -93,9 +93,15 @@ use bytes;
 # Standard use items
 use Data::Dumper;
 use strict;
+use warnings;
 # }}}
 
-=item <xmtplog($Self, $Level, $Msg)>
+=head1 METHODS
+
+=over 4
+=cut
+
+=item I<xmtplog($Self, $Level, $Msg)>
 
 Pass to $Self->log($Level, "%s", $Msg)
 
@@ -219,13 +225,6 @@ sub process_request {
 
   $Self->ClearAlarm();
 
-  # Setup timeout handler
-  $SIG{ALRM} = sub {
-    my ($Package, $Filename, $Line, $Sub) = caller(0);
-    my $LastCmd = $Xmtp->{LastCmd} || '';
-    die "Timeout: State=$LastCmd; In=${Sub}; Line=$Line";
-  };
-
   # Reset any existing state
   $Self->reset_state();
 
@@ -233,23 +232,33 @@ sub process_request {
   $Self->new_connection();
   $Self->xmtplog(2, "New connection");
 
+  # Setup timeout handler (after new_connection, which might
+  #  change $SIG{ALRM} itself)
+  $SIG{ALRM} = sub {
+    my ($Package, $Filename, $Line, $Sub) = caller(0);
+    my $LastCmd = $Xmtp->{LastCmd} || '';
+    die "Timeout: State=$LastCmd; In=${Sub}; Line=$Line";
+  };
+
   # Do all the connection work
   $Self->HandleConnection();
 
   alarm(0);
   };
 
-  if ($@) {
-    if ($@ =~ /^Timeout/) {
-      $Self->timeout($@);
+  if (my $Err = $@) {
+    if ($Err =~ /^Timeout/) {
+      $Self->timeout($Err);
     } else {
-      $Self->error($@);
-      $Self->xmtplog(1, "Processing error: $@");
+      $Self->error($Err);
+      $Self->xmtplog(1, "Processing error: $Err");
     }
   }
 
   # Stop timeout alarm
   alarm(0);
+
+  $Self->close_connection();
 
   $Self->end_request();
 }
@@ -354,18 +363,20 @@ sub HandleModeData {
   while (defined($_ = <STDIN>)) {
     # Remove all null chars
     tr/\000//d;
+    # Normalise to \n line endings
+    s/\r+\n$/\n/;
 
     # Lone . is always EOD
-    if ($_ eq ".\r\n" || $_ eq ".\n") {
+    if ($_ eq ".\n") {
 
       if ($Xmtp->{HandleMime}) {
         if ($InHeader) {
           $Self->ProcessHeaders(\$HeadBuffer, \@Boundaries, $MessageHdrs);
           $Self->end_headers(\$HeadBuffer);
-          print $Fh $HeadBuffer if $Fh;
+          $Self->output_headers($Fh, $HeadBuffer) if $Fh;
         } else {
           $Self->end_body(\$BodyBuffer);
-          print $Fh $BodyBuffer if $Fh && $DoBodyBuffer;
+          $Self->output_body($Fh, $BodyBuffer) if $Fh && $DoBodyBuffer;
         }
       }
 
@@ -379,23 +390,23 @@ sub HandleModeData {
 
       # If not handling MIME, just add straight to spool file
       if (!$HandleMime) {
-        print $Fh $_ if $Fh;
+        $Self->output_body($Fh, $_) if $Fh;
 
       # Handle MIME phases ... {{{
       } else {
 
         if ($InHeader) {
           # Strip bare \r's from headers
-          s/\r(?!\n)//g;
+          s/\r//g;
 
           $HeadBuffer .= $_;
 
           # End of headers
-          if (/^\r*\n$/) {
+          if ($_ eq "\n") {
             $MessageHdrs = $Self->ProcessHeaders(\$HeadBuffer, \@Boundaries, $MessageHdrs);
             $Self->end_headers(\$HeadBuffer);
 
-            print $Fh $HeadBuffer if $Fh;
+            $Self->output_headers($Fh, $HeadBuffer) if $Fh;
             $HeadBuffer = '';
 
             # If message/rfc822 attachment, then we're immediately into headers again
@@ -411,7 +422,7 @@ sub HandleModeData {
           # Found boundary string?
           if (@Boundaries && /$Boundaries[-1]->[1]/) {
             $Self->end_body(\$BodyBuffer);
-            print $Fh $BodyBuffer if $Fh && $DoBodyBuffer;
+            $Self->output_body($Fh, $BodyBuffer) if $Fh && $DoBodyBuffer;
             $BodyBuffer = '';
             $DoBodyBuffer = 0;
 
@@ -425,8 +436,11 @@ sub HandleModeData {
           }
 
           # Always send body to spool file/buffer
-          print $Fh $_ if $Fh && !$DoBodyBuffer;
-          $BodyBuffer .= $_ if $DoBodyBuffer;
+          if ($DoBodyBuffer) {
+            $BodyBuffer .= $_;
+          } else {
+            $Self->output_body($Fh, $_) if $Fh;
+          }
 
           # UUENCODE begin type section
           if (/^begin(?:-base64)? \d{1,4}/) {
@@ -463,9 +477,9 @@ sub HandleModeData {
 sub ProcessHeaders {
   my ($Self, $HeadBuffer, $Boundaries, $MsgHeaders) = @_;
 
-  # Loop through and list all headers (minus \r\n)
+  # Loop through and list all headers (minus \n)
   my @Headers;
-  while ($$HeadBuffer =~ /\G([^\s:]+)(:[ \t]*(?:\r?\n[ \t]+)*)([^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*)\r?\n/gc) {
+  while ($$HeadBuffer =~ /\G([^\s:]+)(:[ \t]*(?:\n[ \t]+)*)([^\n]*(?:\n[ \t]+[^\n]*)*)\n/gc) {
     push @Headers, [ $1, $2, $3 ]
   }
   my ($Remainder) = $$HeadBuffer =~ /\G(.*)$/s;
@@ -486,7 +500,7 @@ sub ProcessHeaders {
   delete @$Self{qw(HeaderList HeaderMap)};
 
   # Build headers again
-  $$HeadBuffer = join "", map { !defined $_->[2] ? "" : join("", @$_, "\r\n") } @Headers;
+  $$HeadBuffer = join "", map { !defined $_->[2] ? "" : join("", @$_, "\n") } @Headers;
   $$HeadBuffer .= $Remainder;
 
   # Extract new MIME boundary details in content-type headers
@@ -532,17 +546,17 @@ sub HandleContentTypeHeader {
   $Boundaries->[-1]->[4] = $MimeType if @$Boundaries;
 
   # Get boundary string
-  my ($Boundary) = ($HeaderValue =~ /boundary=([^\s;]+)/i);
+  my ($Boundary) = $HeaderValue =~ /boundary="([^"]+)"/i;
+  ($Boundary) = $HeaderValue =~ /boundary=([^\s;]+)/i if !$Boundary;
   return if !$Boundary;
 
-  $Boundary = $1 if $Boundary =~ /^\s*"(.*)"\s*$/;
-  $Boundary = "--" . quotemeta($Boundary);
+  my $BoundaryRE = qr/^--\Q$Boundary\E(?:--)?\s*$/;
 
   # Track how deep we are in attached messages
   my $MessageDepth = @$Boundaries ? $Boundaries->[-1]->[2] : 0;
 
   # Create match regexp
-  push @$Boundaries, [ $Boundary, qr/^$Boundary(?:--)?\s*$/, $MessageDepth, $MimeType, '' ];
+  push @$Boundaries, [ $Boundary, $BoundaryRE, $MessageDepth, $MimeType, '' ];
 }
 
 sub HandleEndOfData {
@@ -637,6 +651,7 @@ sub rcpt_to         { undef; }
 sub rset            { undef; }
 sub unknown         { undef; }
 sub quit            { undef; }
+sub close_connection { undef; }
 
 sub begin_data      { undef; }
 sub end_data        { undef; }
@@ -653,6 +668,9 @@ sub uuenc_begin     { undef; }
 sub uuenc_end       { undef; }
 sub binhex_begin    { undef; }
 sub binhex_end      { undef; }
+
+sub output_headers  { print {$_[1]} $_[2]; }
+sub output_body     { print {$_[1]} $_[2]; }
 
 sub timeout         { undef; }
 sub error           { undef; }
@@ -672,5 +690,23 @@ sub send_client_resp {
   my $Msg = shift @MsgLines;
   print STDOUT "$Code $Msg\r\n";
 }
+
+=back
+=cut
+
+=head1 AUTHOR
+
+Rob Mueller E<lt>cpan@robm.fastmail.fmE<gt>
+
+=cut
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2003-2017 by FastMail Pty Ltd
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+=cut
 
 1;

@@ -70,7 +70,13 @@ use bytes;
 # Standard use items
 use Data::Dumper;
 use strict;
+use warnings;
 # }}}
+
+=head1 METHODS
+
+=over 4
+=cut
 
 sub new {
   my $Proto = shift;
@@ -134,7 +140,7 @@ sub debug {
   }
 }
 
-=item I<read_server_response($Self)
+=item I<read_server_response($Self)>
 
 Get the response code and message from the server
 for the last sent command. Returns the response
@@ -191,14 +197,14 @@ sub send_to_client {
   my $Self = shift;
   my $Socket = $Self->{Socket};
   $Self->{LastSent} = $_[0];
-  print $Socket shift(@_);
+  print $Socket shift(@_) . "\r\n";
 }
 
 sub helo {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("HELO " . join(' ', @_) . "\r\n");
+  $Self->send_to_client("HELO " . join(' ', @_));
   return $Self->read_server_response();
 }
 
@@ -206,7 +212,7 @@ sub ehlo {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("EHLO " . join(' ', @_) . "\r\n");
+  $Self->send_to_client("EHLO " . join(' ', @_));
   return $Self->read_server_response();
 }
 
@@ -214,7 +220,7 @@ sub lhlo {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("LHLO " . join(' ', @_) . "\r\n");
+  $Self->send_to_client("LHLO " . join(' ', @_));
   return $Self->read_server_response();
 }
 
@@ -222,7 +228,7 @@ sub noop {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("NOOP\r\n");
+  $Self->send_to_client("NOOP");
   return $Self->read_server_response();
 }
 
@@ -230,7 +236,7 @@ sub mail_from {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("MAIL FROM:" . join(' ', "<" . shift(@_) . ">", @_) . "\r\n");
+  $Self->send_to_client("MAIL FROM:" . join(' ', "<" . shift(@_) . ">", @_));
   return $Self->read_server_response();
 }
 
@@ -238,7 +244,7 @@ sub rcpt_to {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("RCPT TO:" . join(' ', "<" . shift(@_) . ">", @_) . "\r\n");
+  $Self->send_to_client("RCPT TO:" . join(' ', "<" . shift(@_) . ">", @_));
   return $Self->read_server_response();
 }
 
@@ -246,7 +252,7 @@ sub data {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("DATA\r\n");
+  $Self->send_to_client("DATA");
   return $Self->read_server_response();
 }
 
@@ -254,15 +260,33 @@ sub rset {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("RSET\r\n");
+  $Self->send_to_client("RSET");
   return $Self->read_server_response();
 }
+
+=back
+=cut
+
+=head1 AUTHOR
+
+Rob Mueller E<lt>cpan@robm.fastmail.fmE<gt>
+
+=cut
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2003-2017 by FastMail Pty Ltd
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+=cut
 
 sub quit {
   my $Self = shift;
 
   return $Self->no_socket() unless $Self->{Socket};
-  $Self->send_to_client("QUIT\r\n");
+  $Self->send_to_client("QUIT");
   my $Res = $Self->read_server_response();
   close($Self->{Socket});
   $Self->{Socket} = undef;
